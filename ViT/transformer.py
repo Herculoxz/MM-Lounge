@@ -9,18 +9,16 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 
-num_heads = 4 
+
 class AttentionLayer(nn.Module):
 
-    def __init__(self,  embed_dim , num_heads ): # num_heads is added by me 
+    def __init__(self,  embed_dim , dropout =0.1 ):
         super().__init__()
         self.embed_dim = embed_dim
-        self.num_heads = num_heads 
-        self.head_dim = embed_dim // num_heads
-        self.query = nn.Linear(self.embed_dim, self.embed_dim) # the weights are initialised by pytorch
-        self.key = nn.Linear(self.embed_dim, self.embed_dim  , bias = False)
-        self.value = nn.Linear(self.embed_dim, self.embed_dim , bias = False)
-        self.full_op = nn.Linear( self.embed_dim , embed_dim)
+        self.query_proj = nn.Linear(embed_dim , embed_dim , bias =False) # the weights are initialised by pytorch
+        self.key_proj = nn.Linear(embed_dim, embed_dim,bias = False)
+        self.value_proj = nn.Linear(embed_dim ,embed_dim, bias = False)
+       # self.full_op_proj = nn.Linear(embed_dim ,embed_dim,bias = False)
 
        
 
@@ -30,60 +28,165 @@ class AttentionLayer(nn.Module):
 
         assert value.shape == query.shape
 
-        query = query.view( N,S,self.num_heads ,self.head_dim)
-        key = key.view( N ,-1,self.num_heads, self.head_dim)
-        value = value.view( N , -1 , self.num_heads , self.head_dim)
+        query = self.query_proj(query)
+        key = self.key_proj(key)
+        value = self.value_proj(value)
 
-        dot_product = torch.einsum("Q * K = ndsk " , [query , key]) # score for each word 
+        dot_product = torch.einsum("NSD , NTD -> NST " , [query , key]) # score for each word 
 
         if attn_mask is not None:
             
 
-            additive_mask = dot_product.masked_fill(attn_mask==0 , float ('-infi')) # it restricts the sucessive words to communicate with future references 
+            additive_mask = attn_mask.masked_fill(attn_mask==0 , float ('-inf')) # it restricts the sucessive words to communicate with future references 
             dot_product += additive_mask
 
-            attention = torch.softmax( dot_product/self.embed_dim ** (0.5) , dim =3)  
+            attention = torch.softmax( dot_product/(self.embed_dim ** (-0.5)) , dim =-1)  
+          
 
-            y = torch.einsum( " ndst * ntdh = nsdh" ,[attention , value]).reshape( N , S ,D*self.head_dim) # this is the final value of each word 
-            y = self.full_op(y) # multiplied with weighted sum
+            y = torch.einsum( " NST , NTD -> NSD" ,[attention , value]) # this is the final value of each word 
  
             return y # the attention y for each word is generated .
         
-class MultiHeadAttentionLayer(AttentionLayer): # 
-    def __init__(self , embed_dim , num_heads , dropout = 0.1): # 0.1 is the probability for dropout of each token 
+# class MultiHeadAttentionLayer(AttentionLayer): # 
+#     def __init__(self , embed_dim , num_heads , dropout = 0.1): # 0.1 is the probability for dropout of each token 
 
-        super().__init__(embed_dim , dropout)
-        self.num_heads = num_heads
+#         super().__init__(embed_dim , dropout)
+#         self.num_heads = num_heads
+#         self.head_dim = embed_dim // num_heads
 
-        self.head_proj = nn.ModuleList(AttentionLayer(embed_dim , num_heads) for _ in range (num_heads)  )  # parallel processinng of heads for num_heads no. of heads 
+#         assert self.head_dim * num_heads == embed_dim, "embed dim is not correct"
 
-    def forward(self,query, key , value ,x, attn_mask =None): # x is the original input 
-        H = self.num_heads
-        N , S ,D = query.shape
-        N , S , T = value.shape
-        assert key.shape ==value.shape
+#         self.query_proj = nn.Linear(embed_dim , embed_dim , bias =False) # the weights are initialised by pytorch
+#         self.key_proj = nn.Linear(embed_dim, embed_dim,bias = False)
+#         self.value_proj = nn.Linear(embed_dim ,embed_dim, bias = False)
+#         self.full_op_proj = nn.Linear(embed_dim ,embed_dim,bias = False)
+#         self.dropout = nn.Dropout(dropout)
 
-        query = self.query()
-        key = self.key()
-        value = self.value()
+#         #self.head_proj = nn.ModuleList(AttentionLayer(embed_dim , num_heads) for _ in range (num_heads)  )  # parallel processinng of heads for num_heads no. of heads 
+
+#     def forward(self,query, key , value , attn_mask =None): 
+#         H = self.num_heads
+#         N , S ,D = query.shape
+#         N , T,D = value.shape
+#         B = self.head_dim
+#         assert key.shape ==value.shape
+#         assert B == D //H
+
+#         query = self.query_proj(query)
+#         key = self.key_proj(key)
+#         value = self.value_proj(value)
+
+#         query = query.view(N,S,H,B).transpose(1,2) # numheads is the mebdding dim and headdim times all of it 
+#         key = key.view(N,T,H,B).transpose(1,2)
+#         value = value.view(N,T,H,B).transpose(1,2)
 
 
-        dot_product = torch.einsum("nsd * ntd =  ndst",[query ,key])
-        if attn_mask is not None:
+
+
+#         dot_product = torch.einsum("NSHB ,NTHB-> NHST ",[query ,key.transpose(-2,-1)]) / np.sqrt(B)
+#         if attn_mask is not None:
+
+#             additive_mask = attn_mask.unsqueeze(1).unsqueeze(2)
         
-            additive_mask = dot_product.masked_fill(attn_mask==0 , float ('-infi')) 
-            dot_product += additive_mask 
+#             additive_mask = additive_mask.masked_fill(attn_mask==0 , float ('-inf')) 
+#             dot_product += additive_mask 
 
 
 
-            y = nn.Dropout(F.softmax (dot_product))
+#             y = self.dropout(F.softmax (dot_product,dim= -1))
+#             y = torch.matmul(y , value) # NHST , NTDd/h -> NHSd/h
 
-            output = torch.cat([h(query , key , value) for h in self.head_proj] , dim =-1 )
-            output = nn.Dropout(output)
-            return output 
+#             output = y.transpose(1,2).reshape(N,S,D) # concatennating into 3d tensor of NSD 
+
+#             output = self.full_op_proj(y)
+#             assert output != None
+
+#             print(output)
+#             return output 
+
+class MultiHeadAttentionLayer(AttentionLayer):
+    def __init__(self, embed_dim, num_heads, dropout=0.1):
+        super().__init__(embed_dim, dropout)
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+
+        assert self.head_dim * num_heads == embed_dim, "embed dim is not correct"
+
+        self.query_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.key_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.value_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.full_op_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, query, key, value, attn_mask=None):
+        H = self.num_heads
+        N, S, D = query.shape
+        N, T, D = value.shape
+        B = self.head_dim
+
+
+
+        assert key.shape == value.shape
+        assert B == D // H
+
+        assert D == H*B
+
+        query = self.query_proj(query)
+        key = self.key_proj(key)
+        value = self.value_proj(value)
+
+        query = query.reshape(N, S, H, B).transpose(1, 2)
+        key = key.reshape(N, T, H, B).transpose(1, 2)
+        value = value.reshape(N, T, H, B).transpose(1, 2)
+
+        assert key.shape == (N,H,T,B)
+
+        assert query.shape == (N,H,S,B)
+       # assert key.shape == (N,T,H,B)
+        assert value.shape == (N,H,T,B)
+
+
+        dot_product = torch.einsum("NHSB, NHTB -> NHST", query, key) / math.sqrt(B)
+
+        assert dot_product.shape == (N,H,S,T)
+
+        if attn_mask is not None:
+            additive_mask = attn_mask.unsqueeze(1).unsqueeze(2)
+            additive_mask = additive_mask.masked_fill(attn_mask == 0, float('-inf'))
+            dot_product += additive_mask
+            assert dot_product.shape == (N,H,S,T)
+
+
+
+        attn_weights = F.softmax(dot_product, dim=-1)
+        assert attn_weights.shape == (N,H,S,T)
+        attn_weights = self.dropout(attn_weights)
+        assert attn_weights.shape == (N,H,S,T)
+        value = value.view(N , T,H , B)
+        #attn_weights = attn_weights.view(N,H,S,T)
+        assert D == H*B 
+        assert attn_weights.shape == ( N,H,S,T)
+        value = value.reshape(N,H,T,B)
+            
+             
+        assert value.shape == (N,H,T,B)
+       
+
+        y = torch.matmul(attn_weights, value)
+
+        y = y.transpose(1, 2).reshape(N, S, D)
+
+        output = self.full_op_proj(y)
+        
+        # Ensure output is not None
+        assert output is not None, "Output is None"
+        
+        print(output)
+        return output
+
         
 class PositionalEncoding(nn.Module):
-
+###---------------
     def __init__(self , embed_dim , dropout=0.2 , max_len = 5000, device ='cuda'):
         super().__init__()
 
@@ -92,11 +195,17 @@ class PositionalEncoding(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.device = device 
 
+        pos = torch.arange(max_len).unsqueeze(1).float()
+        div_term =torch.exp(torch.arange(0,embed_dim ,2).float()*-(np.log(10000.0)/embed_dim))
+        pos_encoding = torch.zeros(max_len , embed_dim)
 
+        pos_encoding[: , 0::2] = torch.sin(pos*div_term)
+        pos_encoding[: , 1::2] = torch.cos(pos*div_term)
+        self.encoding.weight =nn.Parameter(pos_encoding , requires_grad=False)
     def forward ( self , x):
 
-        N , S= x.shape
-        D = self.embed_dim 
+        N , S ,D= x.shape
+       
 
         print(x.shape)
        
@@ -116,9 +225,10 @@ class PositionalEncoding(nn.Module):
         # #encoding = encoding.reshape(x.shape[0] , x.shape[1]  , 256)
         # print((encoding.shape))
 
-       
+        pos = torch.arange(S).unsqueeze(0)
+        pos_encodings = self.encoding(pos)
 
-        output = x + self.encoding(x)
+        output = x + pos_encodings
         output = self.dropout(output)
 
         return output # to be used in encoder block 
@@ -132,7 +242,8 @@ class SelfAttentionBlock(nn.Module):
         self.layernorm = nn.LayerNorm(input_dim)
 
     def forward(self , seq  , mask ): 
-        self_attention = self.self_attn(seq , mask)
+        self_attention = self.self_attn(seq ,seq,seq, mask)
+        self_attention =torch.add(self_attention , seq )# residual connection to input seq
 
         out = self.dropout(self.layernorm(self_attention))
 
@@ -144,25 +255,40 @@ class SelfAttentionBlock(nn.Module):
 
 class CrossAttentionBlock(nn.Module):
 
-    def __init__(self , input_dim , num_heads , dropout =0.1):
-
+    def __init__(self, input_dim, num_heads, dropout=0.1):
         super().__init__()
-
-        self.cross_attn = MultiHeadAttentionLayer(input_dim , num_heads)
+        self.cross_attn = MultiHeadAttentionLayer(input_dim, num_heads)
+        if self.cross_attn is None:
+            raise ValueError("cross_attn is None after initialization")
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(input_dim)
 
-    def forward(self , seq , cond , x): # x is the original input 
+    def forward(self, seq, cond):  
+        if seq is None:
+            raise ValueError("seq is None")
+        if cond is None:
+            raise ValueError("cond is None")
 
-        cross_attention = self.cross_attn(seq , cond)
-        out = self.dropout(self.norm(cross_attention + x ))
+        print(f'seq: {seq}')
+        print(f'cond: {cond}')
 
-        return out 
+        cross_attention = self.cross_attn(seq, cond, cond)  # since key and value have same dims
+        if cross_attention is None:
+            raise ValueError("cross_attention is None after MultiHeadAttentionLayer")
+        
+        print(f'cross_attention: {cross_attention}')
+
+        cross_attention = self.dropout(cross_attention)
+        out = seq + cross_attention
+        out = self.norm(out)
+
+        return out
+
     
 
 class FeedForwardBlock(nn.Module):
         
-        def __init__( self , input_dim , num_heads , dim_feedforward=2048 , dropout=0.1):
+        def __init__( self , input_dim , dim_feedforward=2048 , dropout=0.1):
 
             super().__init__()
             self.mlp = nn.Sequential(
@@ -177,11 +303,12 @@ class FeedForwardBlock(nn.Module):
 
 
 
-        def forward(self,seq ,x): # x is the original input 
+        def forward(self,seq ):
             mlp = self.mlp(seq)
             out = self.dropout(mlp)
+            out = torch.add(mlp , out )
 
-            out = self.norm( mlp + x)
+            out = self.norm( out)
 ##
             return out 
         
@@ -189,9 +316,9 @@ class FeedForwardBlock(nn.Module):
 class DecoderLayer(nn.Module):
     def  __init__( self , input_dim , num_heads , dim_feedforward =2048 , dropout=0.1):
         super().__init__()
-        self.self_atn_block = SelfAttentionBlock(input_dim , num_heads , dropout )
-        self.cross_atn_block = CrossAttentionBlock(input_dim , num_heads , dropout)
-        self.feedforward_block = FeedForwardBlock(input_dim , num_heads , dim_feedforward , dropout )
+        self.self_atn_block = SelfAttentionBlock(input_dim , num_heads )
+        self.cross_atn_block = CrossAttentionBlock(input_dim , num_heads )
+        self.feedforward_block = FeedForwardBlock(input_dim , num_heads)
 
 
     def forward(self , seq , cond , mask):
@@ -220,6 +347,7 @@ class TransformerDecoder(nn.Module):
         self.score_projection= nn.Linear(embed_dim , vocab_size)
 
         #weights_initialised = _init_weights()
+        self.apply(self._init_weights)
 
         #self.apply(weights_initialised)
         self.device = device 
@@ -232,8 +360,9 @@ class TransformerDecoder(nn.Module):
             D = features.shape[1]
             T = captions.shape[1]
 
-            catpions_embed = self.positional_encoding(captions )
+            
             captions_embedding = self.caption_embedding(captions)
+            catpions_embedding = self.positional_encoding(captions_embedding )
 
 
 
@@ -244,18 +373,15 @@ class TransformerDecoder(nn.Module):
 
             return feature_embedding, captions_embedding
 
-            
-
-
-
-            
 
     def get_causal_mask(self , _len):
 
             # multiplicative 
-            self.register_buffer('tril', torch.tril(torch.ones(_len , _len)))
-            mask = torch.tril(torch.ones(_len , _len))
-            mask = mask.masked_fill(self.tril[:_len, :_len] == 0 , float ( '-inf'))
+           
+            mask = torch.tril(torch.ones(_len , _len)).bool()
+            mask = mask.to(dtype=torch.float)
+            mask = mask.masked_fill(mask == 0 , float ( '-inf'))
+            
 
             return mask 
         
@@ -278,7 +404,7 @@ class TransformerDecoder(nn.Module):
 
     def _init_weights(self , module):
             if isinstance(module , (nn.Linear , nn.Embedding)):
-                module.weight.data.normal__(mean=0.0 , std = 0.02)
+                module.weight.data.normal_(mean=0.0 , std = 0.02)
                 if isinstance(module , nn.Linear) and module.bias is not None:
                     module.bias.data.zero_()
                 elif isinstance(module , nn.LayerNorm):
@@ -387,3 +513,4 @@ class TransformerDecoder(nn.Module):
         
 
         
+
