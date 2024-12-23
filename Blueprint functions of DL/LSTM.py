@@ -49,7 +49,7 @@ class LSTM:
         
 
 
-
+#This particular boilerplate is used to build different applications of LSTM
 
 # lstm = LSTM(input_dim , hidden_dim , key)
 
